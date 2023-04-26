@@ -67,35 +67,13 @@ const terms = [
   { term: 'name_LT', clause: 'name < ?' }
 ]
 
-// Which of all the *query* (where-clause) terms are present?
-function any_term_in_request (req, terms) {
-  terms.forEach((t) => {
-    if (t.term in req.query && 'clause' in t) {
-      return true
-    }
-  })
-  return false
-}
-
-function session_id_present (req) {
-  return (
-    'session' in req.query || (req.auth !== undefined && 'session' in req.auth)
-  )
-}
-
-// anything other than start_at/page_size means new query
-function should_create_new_result_set (req) {
-  if (!session_id_present(req)) {
-    return true
+  const authenticated = ( req.auth !== undefined && 'session' in req.auth );
+  session_id = uuidv4()
+  if ( 'session' in req.query ) {
+    session_id = req.query.session
   }
-  return any_term_in_request(req, terms) || 'sort' in req.query
-}
-
-// req.query comes in as strings. but we need them to BE integers to validate
-function to_int (x) {
-  as_int = parseInt(x)
-  if (as_int === NaN) {
-    return x
+  if ( authenticated ){
+     session_id = req.auth.session
   }
   return as_int
 }
@@ -112,12 +90,22 @@ function sort_clause_SQL (req) {
   return sort_clause
 }
 
-// do we have a session id? if so return it. otherwise create one
-function query_session_id (req) {
-  const authenticated = req.auth !== undefined && 'session' in req.auth
-  session_id = uuidv4()
-  if ('session' in req.query) {
-    session_id = req.query.session
+    users = get_users_from_set_stmt.all(session_id, page_size, start_at)
+    users.forEach((user) => {
+      user.uri = uri(`/user/${user.id}`)
+      // we needed this row to make order by/limit/offset work correctly. but do not show user.
+      delete user.set_rownum
+    })
+    const response = { users: users, start_at, page_size }
+    if (!authenticated) {
+      response.session = session_id
+    }
+
+    const row_count_map = db.get("SELECT COUNT(*) AS row_count FROM users_result_sets WHERE set_session_id = ?",[session_id])
+    response.row_count = row_count_map.row_count
+
+    res.json(response)
+    return
   }
   if (authenticated) {
     session_id = req.auth.session
