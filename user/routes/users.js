@@ -45,6 +45,7 @@ function deleteResultSetsBySessionId (session_id) {
     'DELETE FROM users_result_sets WHERE set_session_id = ?'
   )
   del_stmt.run(session_id)
+  return true
 }
 
 // all the terms we might see in a URL
@@ -67,7 +68,16 @@ const terms = [
   { term: 'name_LT', clause: 'name < ?' }
 ]
 
-  console.log({"a":1});
+// Which of all the *query* (where-clause) terms are present?
+function any_term_in_request (req, terms) {
+  result = terms.every((t) => {
+    if (t.term in req.query && 'clause' in t) {
+      return false
+    }
+    return true
+  })
+  return !result
+}
 
   session_id = uuidv4()
   if ( 'session' in req.query ) {
@@ -160,34 +170,137 @@ function create_new_result_set (req, session_id) {
 
   // creates result rows
   result_set_stmt.run(where_vals)
+  return true
 }
 
-function parse_range_header (hdr,row_count) {
-  // must validate!
-  
-  ranges = []
-  range_type = hdr.match(/^(\w+)=/)
-  hdr = hdr.substring(range_type[0].length)
+// returns [{start: end:}...] ranges (either start or end may be NaN/undefined),
+// or false when the range is not valid
+function ranges_from_header_string (hdr) {
+  // should validate...
 
-  parts = hdr.match(/(\d+)\-(\d*)|\-(\d+)/g)
-  if (parts === null || parts.length < 2) {
-    console.log({ hdr, msg: 'no match' })
-    return ranges
+  ranges = []
+  range_header_parts = hdr.match(/^(\w+)\s*=\s*(.+)$/)
+  unit_type = range_header_parts[1]
+  specs = range_header_parts[2]
+
+  if (unit_type !== 'rows') {
+    // logReturn!
+    return false
   }
-  parts.forEach( x => {
-    [dummy, first_num, second_num] = x.match(/(\d*)-(\d*)/)
-    start = 1
-    end = row_count
-    if ( first_num !== "" ) {
+
+  range_specs = specs.split(/\s*,\s*/)
+  // if no commas, split does not return an array -- just a string
+  if (typeof range_specs == 'string') {
+    range_specs = [range_specs]
+  }
+  const regex = /(\d+)-(\d*)|-(\d+)/
+  succeeded = range_specs.every((range) => {
+    const match = range.match(regex)
+    if (typeof match != 'object') {
+      // error - no match
+      return false
+    }
+    //ignore "complete string" (first array elem from .match)
+    match.shift()
+
+    const [first_num, second_num, alternate_second] = match
+
+    start = undefined
+    end = undefined
+    if (first_num != '') {
       start = parseInt(first_num)
     }
-    if ( second_num !== "" ) {
-      end = parseInt(second_num)
-    } 
-    ranges.push({start, end})
+    if (second_num != '' || alternate_second != '') {
+      end = parseInt(second_num != '' ? second_num : alternate_second)
+    }
+    ranges.push({ start, end })
+    return true
   })
+
+  // console.log({ hdr, unit_type, range_header_parts, specs, ranges })
+
+  if (!succeeded) {
+    console.log('failed!')
+    return false
+  }
+
   return ranges
 }
+
+function range_from_query_params (start, end) {
+  // query params...
+
+  // if neither are defined coming in, call it valid
+  if (start === undefined && start === undefined) {
+    return [{ start, end }]
+  }
+
+  // could validate this (but let's let swagger do that)
+  if (start !== undefined) {
+    start = parseInt(start)
+    // return false if NaN?
+  }
+  if (end !== undefined) {
+    end = parseInt(end)
+    // return false if NaN?
+  }
+
+  // both missing = not a range because parseInt failed
+  if (start === undefined && start === undefined) {
+    return []
+  }
+  return [{ start, end }]
+}
+
+function identify_requested_row_ranges (req, res) {
+  range_header = req.get('Range')
+  if (typeof range_header == 'string') {
+    requested_return_row_ranges = ranges_from_header_string(range_header)
+    if (requested_return_row_ranges == false) {
+      return returnError(res, {
+        status: StatusCodes.REQUESTED_RANGE_NOT_SATISFIABLE,
+        severity: 'Medium',
+        type: 'BadRange',
+        message: `Invalid Range header received`
+      })
+    }
+    return requested_return_row_ranges
+  }
+  requested_return_row_ranges = range_from_query_params(
+    req.query['start_at'],
+    req.query['end_at']
+  )
+  if (requested_return_row_ranges == false) {
+    return returnError(res, {
+      status: StatusCodes.REQUESTED_RANGE_NOT_SATISFIABLE,
+      severity: 'Medium',
+      type: 'BadRange',
+      message: `Invalid range query params received`
+    })
+  }
+  return requested_return_row_ranges
+}
+
+function populate_unspecified_range_values (ranges, row_count) {
+  // convert and undefined start/end to correct values
+  return ranges.map((rr) => {
+    if (isNaN(rr.start)) {
+      rr.start = 0
+    }
+    if (isNaN(rr.end)) {
+      rr.end = row_count - 1
+    }
+    return { start: rr.start, end: rr.end }
+  })
+}
+
+function is_full_range (ranges, row_count) {
+  console.log({ ranges, row_count })
+  return (
+    ranges.length == 1 && ranges[0].start == 0 && ranges[0].end == row_count - 1
+  )
+}
+
 // once the result set is populated, we return out of that (not doing the query again)
 function respond_from_existing_result_set (req, res, session_id) {
   // make sure this is present and accurate -- not gonna trust what they passed in
@@ -196,48 +309,17 @@ function respond_from_existing_result_set (req, res, session_id) {
     [session_id]
   )
   const row_count = row_count_map.row_count
-
-  if (req.get('Range') !== '') {
-    range_header = parse_range_header(req.get('Range'),row_count)
+  requested_ranges = identify_requested_row_ranges(req, res)
+  if (requested_ranges === false) {
+    return false
   }
 
-  // if (
-  //   range_header &&
-  //   (!('type' in range_header) || range_header.type !== 'rows')
-  // ) {
-  //   return returnError(res, {
-  //     status: StatusCodes.REQUESTED_RANGE_NOT_SATISFIABLE,
-  //     severity: 'Medium',
-  //     type: 'BadRange',
-  //     message: `Invalid range header received`
-  //   })
-  // }
+  requested_ranges = populate_unspecified_range_values(
+    requested_ranges,
+    row_count
+  )
 
-  // query params...
-  start_at = 'start_at' in req.query ? req.query.start_at : 1
-  page_size =
-    'page_size' in req.query
-      ? req.query.page_size
-      : parseInt(process.env.DEFAULT_PAGE_SIZE)
-  ranges_to_send = [{ start: start_at, end: start_at + page_size }]
-
-  // ...are overridden by Range header
-  if (range_header) {
-    ranges_to_send = range_header
-  }
-
-
-  // are ranges valid? This should be moved to swagger
-  ranges_to_send.forEach((x) => {
-    if (x.start < 1 || x.start > row_count || x.end < x.start) {
-      return returnError(res, {
-        status: StatusCodes.REQUESTED_RANGE_NOT_SATISFIABLE,
-        severity: 'Medium',
-        type: 'BadRange',
-        message: `Range exceeds existing row range`
-      })
-    }
-  })
+  //console.log({ requested_ranges })
 
   // pull from results, not fresh query
   const get_users_from_set = `SELECT id, name, versionkey, set_rownum FROM users_result_sets WHERE set_session_id = ? ORDER BY set_rownum LIMIT ? OFFSET ?`
@@ -245,14 +327,30 @@ function respond_from_existing_result_set (req, res, session_id) {
 
   users = []
 
-  ranges_to_send.forEach((range) => {
-    users = users.concat(
-      get_users_from_set_stmt.all(
-        session_id,
-        range.end - range.start - 1,
-        range.start
-      )
-    )
+  page_size = undefined
+  if ( req.query['page_size'] !== undefined ) {
+    page_size = req.query['page_size']
+  }
+
+  range_sets = []
+  requested_ranges.every((range) => {
+    row_limit = range.end - range.start + 1
+    if ( page_size !== undefined && row_limit > page_size) {
+      row_limit = page_size;
+    }
+    some_users = get_users_from_set_stmt.all(session_id, row_limit, range.start)
+    users = users.concat( some_users );
+    
+    range_sets.push( `${range.start}-${range.start+row_limit-1}`)
+
+    if ( page_size !== undefined ) {
+      page_size -= some_users.length
+      if (page_size == 0) {
+        // stop when we've found enough rows
+        return false
+      }
+    }
+    return true
   })
 
   // post-process users...
@@ -263,11 +361,9 @@ function respond_from_existing_result_set (req, res, session_id) {
     delete user.set_rownum
   })
 
-  // note we only respond with start_at/page_size, even if Range: header was present
+  // puzzle - what should we send for range if multiple ranges?
   const response = {
     users: users,
-    start_at,
-    page_size,
     row_count
   }
 
@@ -277,15 +373,16 @@ function respond_from_existing_result_set (req, res, session_id) {
     response.session = session_id
   }
 
+  res.set('Content-Range', `rows ${range_sets}/${row_count}`)
   res.set('Accept-Ranges', 'rows')
-  // res.set('Content-Range', `rows ${ranges_to_send[0].start}-${ranges_to_send[0].end}/${row_count}`)
-  res.json(response)
-  res.status(StatusCodes.OK)
 
-  // Entire range? it's a 200. Otherwise partial range {
-  if (start_at != 1 || page_size < row_count) {
+  res.status(StatusCodes.OK)
+  // Entire range? it's a 200. Otherwise partial range
+  if (!is_full_range(requested_ranges, row_count)) {
     res.status(StatusCodes.PARTIAL_CONTENT)
+    //return
   }
+  res.json(response)
 }
 
 function adjust_params_for_validation (req) {
@@ -348,6 +445,7 @@ function are_params_valid (req, res) {
  *         description: Invalid Query
  */
 router.get('/users', async (req, res) => {
+
   // FIXME: arguably we should just do this perodically, but this is easier for now
   deleteExpiredResultSets()
 
@@ -356,9 +454,16 @@ router.get('/users', async (req, res) => {
     return
   }
   session_id = query_session_id(req)
+
+  // if no partial range requested, should not use result set
+  
   if (should_create_new_result_set(req)) {
-    deleteResultSetsBySessionId(session_id)
-    create_new_result_set(req, session_id)
+    if (!deleteResultSetsBySessionId(session_id)) {
+      return
+    }
+    if (!create_new_result_set(req, session_id)) {
+      return
+    }
   }
   respond_from_existing_result_set(req, res, session_id)
 })
