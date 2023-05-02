@@ -83,6 +83,11 @@ function returnError(res, event) {
   log_event(event)
   console.log(event)
 
+  if ( 'headers' in event) {
+    event.headers.keys().forEach( kk => {
+      res.set(kk, event.headers[kk])
+    })
+  }
   res.statusMessage = statusMessage
   res.status(statusCode).end()
   return false

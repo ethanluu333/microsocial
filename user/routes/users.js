@@ -79,12 +79,36 @@ function any_term_in_request (req, terms) {
   return !result
 }
 
-  session_id = uuidv4()
-  if ( 'session' in req.query ) {
-    session_id = req.query.session
+function partial_range_requested(req) {
+  if ('page_size' in req.query || 'start_at' in req.query || 'end_at' in req.query) {
+    return true
   }
-  if ( req.auth !== undefined && 'session' in req.auth ){
-     session_id = req.auth.session
+  return false
+}
+
+function row_count_for_session(session_id) {
+  const row_count_map = db.get(
+    'SELECT COUNT(*) AS row_count FROM users_result_sets WHERE set_session_id = ?',
+    [session_id]
+  )
+  return row_count_map.row_count
+}
+
+// anything other than start_at/page_size means new query
+function should_create_new_result_set (req, session_id) {
+  row_count = row_count_for_session(session_id)
+  if ( !row_count) {
+    return true
+  }
+
+  return any_term_in_request(req, terms) || 'sort' in req.query
+}
+
+// req.query comes in as strings. but we need them to BE integers to validate
+function to_int (x) {
+  as_int = parseInt(x)
+  if (as_int === NaN) {
+    return x
   }
   return as_int
 }
@@ -116,14 +140,9 @@ function sort_clause_SQL (req) {
   return session_id
 }
 
-// populate a users_results_set for this session id
-function create_new_result_set (req, session_id) {
-  now = new Date().toISOString()
-
+function where_clause_from_query (req) {
   where_clauses = []
-  // hardcoding user_id for now
-  where_vals = [1, now, session_id]
-
+  where_vals = []
   terms
     .filter((x) => 'clause' in x)
     .forEach((x) => {
@@ -135,11 +154,11 @@ function create_new_result_set (req, session_id) {
             '(' +
             Array(req.query[term].length).fill(clause).join(conjunction) +
             ')'
-          // console.log({term:clauses,vals:req.query[term]})
+          // console.log({in: "where_clause_from_query", term:clauses,vals:req.query[term]})
           where_clauses.push(clauses)
           where_vals = where_vals.concat(req.query[term])
         } else {
-          // console.log({term:clause,val:req.query[term]})
+          // console.log({in: "where_clause_from_query", term:clause,val:req.query[term]})
           where_clauses.push(clause)
           where_vals.push(req.query[term])
         }
@@ -150,9 +169,20 @@ function create_new_result_set (req, session_id) {
   if (where_clause !== '') {
     where_clause = ' WHERE ' + where_clause
   }
+  return [where_clause, where_vals]
+}
+
+// populate a users_results_set for this session id
+function create_new_result_set (req, session_id) {
+  now = new Date().toISOString()
+
+  const [where_clause, where_vals] = where_clause_from_query(req)
+
+  // hardcoding user_id for now
+  all_where_vals = [1, now, session_id, ...where_vals]
 
   const sort_clause = sort_clause_SQL(req)
-  const base =
+  const result_sql =
     `INSERT INTO users_result_sets ` +
     `(set_querying_user_id, set_results_as_of, set_session_id, ` +
     `set_rownum, ` +
@@ -162,14 +192,14 @@ function create_new_result_set (req, session_id) {
     `ROW_NUMBER() OVER (ORDER BY ${sort_clause}),` +
     `id,name,versionkey ` +
     `FROM ` +
-    `users`
+    `users` +
+    where_clause
 
-  const result_sql = base + where_clause
-  console.log({ result_sql, where_vals, queryparams: req.query })
+  console.log({ in: create_new_result_set, result_sql, all_where_vals, queryparams: req.query, sort_clause })
   const result_set_stmt = db.prepare(result_sql)
 
   // creates result rows
-  result_set_stmt.run(where_vals)
+  result_set_stmt.run(all_where_vals)
   return true
 }
 
@@ -178,24 +208,24 @@ function create_new_result_set (req, session_id) {
 function ranges_from_header_string (hdr) {
   // should validate...
 
-  ranges = []
   range_header_parts = hdr.match(/^(\w+)\s*=\s*(.+)$/)
   unit_type = range_header_parts[1]
-  specs = range_header_parts[2]
 
   if (unit_type !== 'rows') {
     // logReturn!
     return false
   }
 
+  specs = range_header_parts[2]
   range_specs = specs.split(/\s*,\s*/)
   // if no commas, split does not return an array -- just a string
   if (typeof range_specs == 'string') {
     range_specs = [range_specs]
   }
-  const regex = /(\d+)-(\d*)|-(\d+)/
+
+  ranges = []
   succeeded = range_specs.every((range) => {
-    const match = range.match(regex)
+    const match = range.match(/(\d+)-(\d*)|-(\d+)/)
     if (typeof match != 'object') {
       // error - no match
       return false
@@ -217,10 +247,10 @@ function ranges_from_header_string (hdr) {
     return true
   })
 
-  // console.log({ hdr, unit_type, range_header_parts, specs, ranges })
+  // console.log({ in:"ranges_from_header_string", hdr, unit_type, range_header_parts, specs, ranges })
 
   if (!succeeded) {
-    console.log('failed!')
+    console.log('ranges_from_header_string failed!')
     return false
   }
 
@@ -253,32 +283,16 @@ function range_from_query_params (start, end) {
 }
 
 function identify_requested_row_ranges (req, res) {
+  // header trumps query vals
   range_header = req.get('Range')
   if (typeof range_header == 'string') {
-    requested_return_row_ranges = ranges_from_header_string(range_header)
-    if (requested_return_row_ranges == false) {
-      return returnError(res, {
-        status: StatusCodes.REQUESTED_RANGE_NOT_SATISFIABLE,
-        severity: 'Medium',
-        type: 'BadRange',
-        message: `Invalid Range header received`
-      })
-    }
-    return requested_return_row_ranges
+    return ranges_from_header_string(range_header)
   }
-  requested_return_row_ranges = range_from_query_params(
+
+  return range_from_query_params(
     req.query['start_at'],
     req.query['end_at']
   )
-  if (requested_return_row_ranges == false) {
-    return returnError(res, {
-      status: StatusCodes.REQUESTED_RANGE_NOT_SATISFIABLE,
-      severity: 'Medium',
-      type: 'BadRange',
-      message: `Invalid range query params received`
-    })
-  }
-  return requested_return_row_ranges
 }
 
 function populate_unspecified_range_values (ranges, row_count) {
@@ -295,23 +309,65 @@ function populate_unspecified_range_values (ranges, row_count) {
 }
 
 function is_full_range (ranges, row_count) {
-  console.log({ ranges, row_count })
   return (
     ranges.length == 1 && ranges[0].start == 0 && ranges[0].end == row_count - 1
   )
 }
 
+function respond_directly_with_query (req, res) {
+  const [where_clause, where_vals] = where_clause_from_query(req)
+
+  const sort_clause = sort_clause_SQL(req)
+  const get_users_sql =
+    `SELECT ` +
+    `id,name,versionkey ` +
+    `FROM ` +
+    `users` +
+    where_clause +
+    ` ORDER BY ${sort_clause}`
+
+  console.log({ in:"respond_directly_with_query",
+    get_users_sql,
+    where_vals,
+    queryparams: req.query,
+    sort_clause
+  })
+  const get_users_stmt = db.prepare(get_users_sql)
+
+  // creates result rows
+  users = get_users_stmt.all(where_vals)
+  row_count = users.length
+
+  // post-process users...
+  users.forEach((user) => {
+    user.uri = USERS_SERVICE(`/user/${user.id}`)
+  })
+
+  const response = {
+    users: users,
+    row_count
+  }
+
+  res.set('Content-Range', `rows 0-${row_count - 1}/${row_count}`)
+  res.set('Accept-Ranges', 'rows')
+  res.status(StatusCodes.OK)
+  res.json(response)
+}
+
 // once the result set is populated, we return out of that (not doing the query again)
 function respond_from_existing_result_set (req, res, session_id) {
   // make sure this is present and accurate -- not gonna trust what they passed in
-  const row_count_map = db.get(
-    'SELECT COUNT(*) AS row_count FROM users_result_sets WHERE set_session_id = ?',
-    [session_id]
-  )
-  const row_count = row_count_map.row_count
+  const row_count = row_count_for_session(session_id)
+
   requested_ranges = identify_requested_row_ranges(req, res)
   if (requested_ranges === false) {
-    return false
+      return returnError(res, {
+        status: StatusCodes.REQUESTED_RANGE_NOT_SATISFIABLE,
+        severity: 'Medium',
+        type: 'BadRange',
+        message: `Invalid Range header received`,
+        headers: [ { 'Content-Range': `rows */${row_count}`}]
+      })
   }
 
   requested_ranges = populate_unspecified_range_values(
@@ -328,22 +384,22 @@ function respond_from_existing_result_set (req, res, session_id) {
   users = []
 
   page_size = undefined
-  if ( req.query['page_size'] !== undefined ) {
+  if (req.query['page_size'] !== undefined) {
     page_size = req.query['page_size']
   }
 
   range_sets = []
   requested_ranges.every((range) => {
     row_limit = range.end - range.start + 1
-    if ( page_size !== undefined && row_limit > page_size) {
-      row_limit = page_size;
+    if (page_size !== undefined && row_limit > page_size) {
+      row_limit = page_size
     }
     some_users = get_users_from_set_stmt.all(session_id, row_limit, range.start)
-    users = users.concat( some_users );
-    
-    range_sets.push( `${range.start}-${range.start+row_limit-1}`)
+    users = users.concat(some_users)
 
-    if ( page_size !== undefined ) {
+    range_sets.push(`${range.start}-${range.start + row_limit - 1}`)
+
+    if (page_size !== undefined) {
       page_size -= some_users.length
       if (page_size == 0) {
         // stop when we've found enough rows
@@ -378,7 +434,7 @@ function respond_from_existing_result_set (req, res, session_id) {
 
   res.status(StatusCodes.OK)
   // Entire range? it's a 200. Otherwise partial range
-  if (!is_full_range(requested_ranges, row_count)) {
+  if (page_size !== undefined || !is_full_range(requested_ranges, row_count)) {
     res.status(StatusCodes.PARTIAL_CONTENT)
     //return
   }
@@ -445,7 +501,6 @@ function are_params_valid (req, res) {
  *         description: Invalid Query
  */
 router.get('/users', async (req, res) => {
-
   // FIXME: arguably we should just do this perodically, but this is easier for now
   deleteExpiredResultSets()
 
@@ -453,19 +508,21 @@ router.get('/users', async (req, res) => {
   if (!are_params_valid(req, res)) {
     return
   }
-  session_id = query_session_id(req)
 
-  // if no partial range requested, should not use result set
-  
-  if (should_create_new_result_set(req)) {
-    if (!deleteResultSetsBySessionId(session_id)) {
-      return
+  if (partial_range_requested(req)) {
+    session_id = query_session_id(req)
+
+    if (should_create_new_result_set(req,session_id)) {
+      if (!deleteResultSetsBySessionId(session_id)) {
+        return
+      }
+      if (!create_new_result_set(req, session_id)) {
+        return
+      }
     }
-    if (!create_new_result_set(req, session_id)) {
-      return
-    }
+    return respond_from_existing_result_set(req, res, session_id)
   }
-  respond_from_existing_result_set(req, res, session_id)
+  return respond_directly_with_query(req, res)
 })
 
 /**
