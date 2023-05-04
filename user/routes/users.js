@@ -125,15 +125,12 @@ function sort_clause_SQL (req) {
   return sort_clause
 }
 
-    users = get_users_from_set_stmt.all(session_id, page_size, start_at)
-    users.forEach((user) => {
-      user.uri = uri(`/user/${user.id}`)
-      // we needed this row to make order by/limit/offset work correctly. but do not show user.
-      delete user.set_rownum
-    })
-    res.json({ users: users, start_at, page_size })
-    return;
-  }
+// do we have a session id? if so return it. otherwise create one
+function query_session_id (req) {
+  const authenticated = req.auth !== undefined && 'session' in req.auth
+  session_id = uuidv4()
+  if ('session' in req.query) {
+    session_id = req.query.session  }
   if (authenticated) {
     session_id = req.auth.session
   }
