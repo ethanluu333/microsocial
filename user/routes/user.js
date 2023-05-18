@@ -56,7 +56,7 @@ router.get("/user/:id", (req, res) => {
     return;
   }
 
-  const stmt = db.prepare("SELECT id,name FROM users where id = ?");
+  const stmt = db.prepare("SELECT id, name, phone_number FROM users where id = ?");  // Include the phone field
   users = stmt.all([id]);
 
   if (users.length < 1) {
@@ -75,40 +75,6 @@ router.get("/user/:id", (req, res) => {
   res.json(user);
 });
 
-/**
- * @swagger
- * /user/{id}:
- *   put:
- *     summary: Update User
- *     description: Replace all* fields for one User, by id.
- *     operationId: UpdateUserById
- *     tags: [Users API]
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         description: Numeric ID of the user.
- *         schema:
- *            type: integer
- *     requestBody:
- *       required: true
- *       content:
- *          application/json:
- *            schema:
- *              $ref: '#/components/schemas/UpdatingUser'
- *     responses:
- *       200:
- *         description: User Updated (all fields)
- *         content:
- *          application/json:
- *            schema:
- *              $ref: '#/components/schemas/RetrievedUser'
- *       400:
- *          description: Invalid update. (Contents not acceptable)
- *       404:
- *          description: No such User
- *          examples: [ "Not Found", "No such user" ]
- */
 router.put("/user/:id", (req, res) => {
   const id = parseInt(req.params.id);
 
@@ -140,10 +106,10 @@ router.put("/user/:id", (req, res) => {
     return;
   }
 
-  const stmt = db.prepare(`UPDATE users SET name=?, password=? WHERE id=?`);
+  const stmt = db.prepare(`UPDATE users SET name=?, password=?, phone_number=? WHERE id=?`);  // Include the phone field
 
   try {
-    info = stmt.run([updatedUser.name, updatedUser.password, id]);
+    info = stmt.run([updatedUser.name, updatedUser.password, updatedUser.phone_number, id]);  // Include the phone field
     if (info.changes < 1) {
       log_event({
         severity: 'Low',
@@ -174,40 +140,6 @@ router.put("/user/:id", (req, res) => {
   res.redirect(`${id}`);
 });
 
-/**
- * @swagger
- * /user/{id}:
- *   patch:
- *     summary: (Partially) update User fields
- *     description: Replace any submitted fields for one User, by id.
- *     operationId: PatchUserById
- *     tags: [Users API]
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         description: Numeric ID of the user.
- *         schema:
- *            type: integer
- *     requestBody:
- *       required: true
- *       content:
- *          application/json:
- *            schema:
- *              $ref: '#/components/schemas/PatchingUser'
- *     responses:
- *       200:
- *         description: User Updated (submitted fields only, but all fields returned)
- *         content:
- *          application/json:
- *            schema:
- *              $ref: '#/components/schemas/RetrievedUser'
- *       400:
- *          description: Invalid update. (Contents not acceptable)
- *       404:
- *          description: User not found
- *          examples: [ "Not Found", "No such user" ]
- */
 router.patch("/user/:id", (req, res) => {
   const id = parseInt(req.params.id);
 
@@ -252,6 +184,11 @@ router.patch("/user/:id", (req, res) => {
     if ("password" in updatedUser) {
       updateClauses.push("password = ?");
       updateParams.push(updatedUser.password);
+    }
+
+    if ("phone_number" in updatedUser) {
+      updateClauses.push("phone_number = ?");  // Include the phone field
+      updateParams.push(updatedUser.phone_number);  // Include the phone field
     }
 
     const stmt = db.prepare(

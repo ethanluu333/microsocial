@@ -317,7 +317,7 @@ function respond_directly_with_query (req, res) {
   const sort_clause = sort_clause_SQL(req)
   const get_users_sql =
     `SELECT ` +
-    `id,name,versionkey ` +
+    `id,name,phone_number,versionkey ` +
     `FROM ` +
     `users` +
     where_clause +
@@ -375,7 +375,7 @@ function respond_from_existing_result_set (req, res, session_id) {
   //console.log({ requested_ranges })
 
   // pull from results, not fresh query
-  const get_users_from_set = `SELECT id, name, versionkey, set_rownum FROM users_result_sets WHERE set_session_id = ? ORDER BY set_rownum LIMIT ? OFFSET ?`
+  const get_users_from_set = `SELECT id, name, phone_number, versionkey, set_rownum FROM users_result_sets WHERE set_session_id = ? ORDER BY set_rownum LIMIT ? OFFSET ?`
   const get_users_from_set_stmt = db.prepare(get_users_from_set)
 
   users = []

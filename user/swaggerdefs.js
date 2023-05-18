@@ -251,5 +251,10 @@
  *          type: string 
  *          //$ref: '#/components/schemas/UserSortingOption'
  * 
+ *     PhoneNumber:
+ *     type: string
+ *     pattern: '^[0-9]{10}$'
+ *     description: A 10-digit phone number.
+ * 
  */
  
